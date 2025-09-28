@@ -1,0 +1,1268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HAPPY RABBIT</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #222;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: monospace;
+        }
+        canvas {
+            border: 2px solid #444;
+            background: #87CEEB;
+        }
+        .controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        Controls: SPACE/UP/W to jump and fly | LEFT CLICK to use special items | ESC to quit
+    </div>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+    <script>
+        // Game Constants
+        const WIDTH = 800;
+        const HEIGHT = 600;
+        const GROUND_Y = 570;
+        const FPS = 60;
+
+        const RABBIT_W = 56;
+        const RABBIT_H = 46;
+        const BASE_SPEED = 8.0;
+        const GRAVITY = 1.02;
+
+        const JUMP_V0 = -13.2;
+        const MAX_JUMP_HOLD_MS = 200;
+        const HOLD_GRAVITY_SCALE = 0.42;
+        const JUMP_CUT_FACTOR = 0.5;
+        const MAX_JUMPS = 2;
+        const CEILING_Y = 90;
+
+        const RAMP_START_SCORE = 3000;
+        const RAMP_SLOPE = 0.00055;
+
+        const WING_SCORE_BUDGET = 600.0;
+        const WING_GRAVITY = 0.30;
+        const WING_ASCEND_VEL = -0.85;
+        const WING_JITTER_MS = [800, 2000];
+        const WING_PICKUP_SIZE = [48, 36];
+
+        const SUPER_DURATION_MS = 8000;
+        const SUPER_SCALE = 1.18;
+
+        const REVIVE_COUNTDOWN_MS = 3000;
+        const POST_REVIVE_IFRAME_MS = 1200;
+
+        const CARROT_LOW_CHOICES = [GROUND_Y-84, GROUND_Y-68, GROUND_Y-52];
+        const CARROT_ROW_MIN = 3;
+        const CARROT_ROW_MAX = 6;
+
+        const OBST_MIN_GAP = 1600;
+        const OBST_MAX_GAP = 2400;
+        const OBST_GAP_SCORE_FACTOR = 0.35;
+
+        const ROCK_W_MIN = 44;
+        const ROCK_W_MAX = 90;
+        const ROCK_H_MIN = 48;
+        const ROCK_H_MAX = 110;
+
+        const FOX_W = 78;
+        const FOX_H = 56;
+
+        const SCENE_GRASS = "grass";
+        const SCENE_HELL = "hell";
+        const SCENE_HEAVEN = "heaven";
+
+        // Canvas setup
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Utility functions
+        function lerp(a, b, t) {
+            return a + (b - a) * t;
+        }
+
+        function random(min, max) {
+            return Math.random() * (max - min) + min;
+        }
+
+        function randomInt(min, max) {
+            return Math.floor(Math.random() * (max - min + 1)) + min;
+        }
+
+        function randomChoice(arr) {
+            return arr[Math.floor(Math.random() * arr.length)];
+        }
+
+        function loadBest() {
+            try {
+                return parseInt(localStorage.getItem('happyRabbitBest')) || 0;
+            } catch {
+                return 0;
+            }
+        }
+
+        function saveBest(score) {
+            try {
+                localStorage.setItem('happyRabbitBest', Math.floor(score).toString());
+            } catch {}
+        }
+
+        function wingsSecondsLeft(scoreBudget) {
+            return Math.max(0, Math.round(scoreBudget / 35.0));
+        }
+
+        // Background class
+        class Background {
+            constructor() {
+                this.t = 0.0;
+                this.hillsOff = 0;
+                this.resetCloudsFlowersBirds();
+            }
+
+            resetCloudsFlowersBirds() {
+                this.clouds = [];
+                for (let i = 0; i < 10; i++) {
+                    this.clouds.push([randomInt(0, WIDTH), randomInt(60, 220), randomInt(120, 280)]);
+                }
+                
+                this.flowers = [];
+                for (let i = 0; i < 90; i++) {
+                    this.flowers.push([
+                        randomInt(0, WIDTH), 
+                        randomInt(GROUND_Y+10, HEIGHT-12),
+                        randomChoice([[245,215,0], [255,160,160], [200,255,200], [200,220,255]])
+                    ]);
+                }
+                
+                this.birds = [];
+                for (let i = 0; i < 5; i++) {
+                    this.birds.push([randomInt(0, WIDTH), randomInt(90, 200), randomChoice([1, -1])]);
+                }
+            }
+
+            update(worldSpeed, dt) {
+                this.t += dt;
+                this.hillsOff = (this.hillsOff + worldSpeed * 0.25) % (WIDTH + 200);
+                
+                for (let c of this.clouds) {
+                    c[0] -= worldSpeed * 0.35;
+                    if (c[0] + c[2] < -20) {
+                        c[0] = WIDTH + randomInt(30, 200);
+                        c[1] = randomInt(60, 220);
+                        c[2] = randomInt(120, 280);
+                    }
+                }
+                
+                for (let f of this.flowers) {
+                    f[0] -= worldSpeed * 0.5;
+                    if (f[0] < -6) {
+                        f[0] = WIDTH + randomInt(0, 120);
+                        f[1] = randomInt(GROUND_Y+10, HEIGHT-12);
+                    }
+                }
+                
+                for (let b of this.birds) {
+                    b[0] += b[2] * 0.8;
+                    if (b[0] < -20) {
+                        b[0] = WIDTH + 10;
+                        b[1] = randomInt(90, 200);
+                        b[2] = -1;
+                    }
+                    if (b[0] > WIDTH + 20) {
+                        b[0] = -10;
+                        b[1] = randomInt(90, 200);
+                        b[2] = 1;
+                    }
+                }
+            }
+
+            draw(ctx, scene) {
+                let top, bottom, grass1, grass2, hill1, hill2, sun;
+                
+                if (scene === SCENE_GRASS) {
+                    top = [160,210,255]; bottom = [225,248,255];
+                    grass1 = [120,190,90]; grass2 = [95,170,75];
+                    hill1 = [120,160,120]; hill2 = [110,150,115];
+                    sun = [255,235,150];
+                } else if (scene === SCENE_HELL) {
+                    top = [60,10,10]; bottom = [120,20,20];
+                    grass1 = [90,35,35]; grass2 = [75,25,25];
+                    hill1 = [90,30,30]; hill2 = [110,40,40];
+                    sun = [255,90,60];
+                } else { // HEAVEN
+                    top = [220,235,255]; bottom = [255,255,255];
+                    grass1 = [185,225,185]; grass2 = [165,210,170];
+                    hill1 = [170,210,230]; hill2 = [155,200,220];
+                    sun = [255,255,255];
+                }
+
+                // Sky gradient
+                for (let i = 0; i < HEIGHT; i++) {
+                    const t = i / HEIGHT;
+                    const r = Math.floor(lerp(top[0], bottom[0], t));
+                    const g = Math.floor(lerp(top[1], bottom[1], t));
+                    const b = Math.floor(lerp(top[2], bottom[2], t));
+                    ctx.fillStyle = `rgb(${r},${g},${b})`;
+                    ctx.fillRect(0, i, WIDTH, 1);
+                }
+
+                // Sun
+                ctx.fillStyle = `rgb(${sun[0]},${sun[1]},${sun[2]})`;
+                ctx.beginPath();
+                ctx.arc(120, 120, 50, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Hills
+                const off = Math.floor(this.hillsOff);
+                ctx.fillStyle = `rgb(${hill1[0]},${hill1[1]},${hill1[2]})`;
+                ctx.beginPath();
+                ctx.moveTo(0-off, GROUND_Y-110);
+                ctx.lineTo(240-off, GROUND_Y-220);
+                ctx.lineTo(480-off, GROUND_Y-110);
+                ctx.lineTo(720-off, GROUND_Y-240);
+                ctx.lineTo(1000-off, GROUND_Y-110);
+                ctx.lineTo(1280-off, GROUND_Y-220);
+                ctx.lineTo(1580-off, GROUND_Y-110);
+                ctx.lineTo(WIDTH, GROUND_Y);
+                ctx.lineTo(0, GROUND_Y);
+                ctx.closePath();
+                ctx.fill();
+
+                // Clouds
+                for (let [x, y, w] of this.clouds) {
+                    const ccol = scene !== SCENE_HELL ? 'rgb(255,255,255)' : 'rgb(220,180,180)';
+                    ctx.fillStyle = ccol;
+                    ctx.beginPath();
+                    ctx.ellipse(x + w/2, y + w*0.25, w/2, w*0.25, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.beginPath();
+                    ctx.ellipse(x + w*0.7, y - 12 + w*0.225, w*0.4, w*0.225, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                // Ground
+                ctx.fillStyle = `rgb(${grass1[0]},${grass1[1]},${grass1[2]})`;
+                ctx.fillRect(0, GROUND_Y, WIDTH, HEIGHT - GROUND_Y);
+                ctx.fillStyle = `rgb(${grass2[0]},${grass2[1]},${grass2[2]})`;
+                ctx.fillRect(0, GROUND_Y + 24, WIDTH, HEIGHT - (GROUND_Y + 24));
+                
+                ctx.strokeStyle = scene !== SCENE_HELL ? 'rgb(60,90,60)' : 'rgb(120,30,30)';
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.moveTo(0, GROUND_Y);
+                ctx.lineTo(WIDTH, GROUND_Y);
+                ctx.stroke();
+
+                // Flowers/embers/sparkles
+                for (let [x, y, c] of this.flowers) {
+                    let color;
+                    if (scene === SCENE_HELL) {
+                        color = Math.random() < 0.5 ? 'rgb(255,120,80)' : 'rgb(255,180,120)';
+                    } else if (scene === SCENE_HEAVEN) {
+                        color = 'rgb(255,255,255)';
+                    } else {
+                        color = `rgb(${c[0]},${c[1]},${c[2]})`;
+                    }
+                    ctx.fillStyle = color;
+                    ctx.beginPath();
+                    ctx.arc(x, y, 2, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                // Birds
+                for (let [x, y, d] of this.birds) {
+                    const col = scene !== SCENE_HELL ? 'rgb(100,130,160)' : 'rgb(200,90,90)';
+                    ctx.strokeStyle = col;
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.moveTo(x, y);
+                    ctx.lineTo(x + 10*d, y + 5);
+                    ctx.lineTo(x + 20*d, y);
+                    ctx.stroke();
+                }
+            }
+        }
+
+        // Rabbit class
+        class Rabbit {
+            constructor(x, groundY) {
+                this.baseW = RABBIT_W;
+                this.baseH = RABBIT_H;
+                this.scale = 1.0;
+                this.x = x;
+                this.groundY = groundY;
+                this.w = RABBIT_W;
+                this.h = RABBIT_H;
+                this.y = groundY - this.h;
+                this.vy = 0.0;
+                this.onGround = true;
+                
+                this.jumpHolding = false;
+                this.jumpHoldTime = 0;
+                this.jumpCount = 0;
+                this.jumpCutApplied = false;
+                
+                this.hasWings = false;
+                this.wingScoreLeft = 0.0;
+                
+                this.superActive = false;
+                this.superTimer = 0;
+                
+                this.earPhase = Math.random() * Math.PI * 2;
+                this.iframeMs = 0;
+            }
+
+            get rect() {
+                return {
+                    x: Math.floor(this.x),
+                    y: Math.floor(this.y),
+                    w: Math.floor(this.w),
+                    h: Math.floor(this.h),
+                    right: Math.floor(this.x + this.w),
+                    bottom: Math.floor(this.y + this.h),
+                    centerx: Math.floor(this.x + this.w/2),
+                    centery: Math.floor(this.y + this.h/2)
+                };
+            }
+
+            startJump() {
+                if (!this.hasWings && this.jumpCount < MAX_JUMPS) {
+                    this.vy = JUMP_V0;
+                    this.onGround = false;
+                    this.jumpHolding = true;
+                    this.jumpHoldTime = 0;
+                    this.jumpCutApplied = false;
+                    this.jumpCount++;
+                }
+            }
+
+            setJumpHold(isDown) {
+                this.jumpHolding = isDown && (this.vy < 0) && (this.jumpHoldTime < MAX_JUMP_HOLD_MS);
+            }
+
+            releaseJump() {
+                if (!this.hasWings && (this.vy < 0) && !this.jumpCutApplied) {
+                    this.vy *= JUMP_CUT_FACTOR;
+                    this.jumpCutApplied = true;
+                }
+                this.jumpHolding = false;
+            }
+
+            giveWings() {
+                this.hasWings = true;
+                this.wingScoreLeft = WING_SCORE_BUDGET;
+            }
+
+            startSuper() {
+                this.superActive = true;
+                this.superTimer = SUPER_DURATION_MS;
+                this.scale = SUPER_SCALE;
+                this.w = Math.floor(this.baseW * this.scale);
+                this.h = Math.floor(this.baseH * this.scale);
+                this.y = Math.min(this.y, this.groundY - this.h);
+            }
+
+            endSuper() {
+                this.superActive = false;
+                this.scale = 1.0;
+                this.w = this.baseW;
+                this.h = this.baseH;
+                this.y = Math.min(this.y, this.groundY - this.h);
+            }
+
+            updatePhysics(dt, scoreGain, spaceHeld) {
+                if (this.iframeMs > 0) {
+                    this.iframeMs -= dt;
+                }
+
+                if (this.superActive) {
+                    this.superTimer -= dt;
+                    if (this.superTimer <= 0) {
+                        this.endSuper();
+                    }
+                }
+
+                if (this.hasWings) {
+                    this.wingScoreLeft -= scoreGain;
+                    if (this.wingScoreLeft <= 0) {
+                        this.hasWings = false;
+                    }
+                    if (spaceHeld) {
+                        this.vy += WING_ASCEND_VEL;
+                    }
+                    this.vy += WING_GRAVITY;
+                } else {
+                    if (this.jumpHolding && (this.vy < 0) && (this.jumpHoldTime < MAX_JUMP_HOLD_MS)) {
+                        this.vy += GRAVITY * HOLD_GRAVITY_SCALE;
+                        this.jumpHoldTime += dt;
+                    } else {
+                        this.jumpHolding = false;
+                        this.vy += GRAVITY;
+                    }
+                }
+
+                this.y += this.vy;
+
+                // Ceiling clamp
+                if (this.y < CEILING_Y) {
+                    this.y = CEILING_Y;
+                    if (this.vy < 0) {
+                        this.vy = 0;
+                    }
+                }
+
+                // Floor
+                if (this.y + this.h >= this.groundY) {
+                    this.y = this.groundY - this.h;
+                    this.vy = 0;
+                    this.onGround = true;
+                    this.jumpCount = 0;
+                    this.jumpCutApplied = false;
+                } else {
+                    this.onGround = false;
+                }
+            }
+
+            draw(ctx, tMs, scene) {
+                const r = this.rect;
+                const flicker = (this.iframeMs > 0) && (Math.floor(tMs / 80) % 2 === 0);
+                
+                // Shadow
+                ctx.fillStyle = scene !== SCENE_HELL ? 'rgb(65,85,65)' : 'rgb(110,50,50)';
+                ctx.beginPath();
+                ctx.ellipse(r.centerx, this.groundY - 4, 26, 4, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                const bodyCol = this.superActive ? 'rgb(220,245,255)' : 'rgb(240,240,245)';
+                const outlineCol = this.superActive ? 'rgb(120,170,220)' : 'rgb(160,160,170)';
+
+                if (!flicker) {
+                    // Body
+                    ctx.fillStyle = bodyCol;
+                    ctx.beginPath();
+                    ctx.ellipse(r.centerx, r.centery, r.w/2, r.h/2, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = outlineCol;
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+
+                    // Head
+                    const headX = r.x + 25;
+                    const headY = r.y - 14 + 15;
+                    ctx.fillStyle = bodyCol;
+                    ctx.beginPath();
+                    ctx.ellipse(headX, headY, 15, 15, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = outlineCol;
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+
+                    // Ears
+                    const wob = Math.floor(4 * Math.sin(tMs * 0.012 + this.earPhase));
+                    const ear1X = headX - 10;
+                    const ear1Y = headY - 22 + wob;
+                    const ear2X = headX + 12;
+                    const ear2Y = headY - 18 - wob;
+
+                    // Ear 1
+                    ctx.fillStyle = bodyCol;
+                    ctx.beginPath();
+                    ctx.ellipse(ear1X, ear1Y, 6, 13, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = 'rgb(255,190,210)';
+                    ctx.beginPath();
+                    ctx.ellipse(ear1X, ear1Y, 3, 9, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = outlineCol;
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.ellipse(ear1X, ear1Y, 6, 13, 0, 0, Math.PI * 2);
+                    ctx.stroke();
+
+                    // Ear 2
+                    ctx.fillStyle = bodyCol;
+                    ctx.beginPath();
+                    ctx.ellipse(ear2X, ear2Y, 6, 12, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = 'rgb(255,190,210)';
+                    ctx.beginPath();
+                    ctx.ellipse(ear2X, ear2Y, 3, 8, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = outlineCol;
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.ellipse(ear2X, ear2Y, 6, 12, 0, 0, Math.PI * 2);
+                    ctx.stroke();
+
+                    // Eye
+                    ctx.fillStyle = 'rgb(20,20,20)';
+                    ctx.beginPath();
+                    ctx.arc(headX + 8, headY, 3, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // Nose
+                    ctx.fillStyle = 'rgb(255,120,130)';
+                    ctx.beginPath();
+                    ctx.arc(headX + 12, headY + 6, 3, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // Tail
+                    ctx.strokeStyle = outlineCol;
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.arc(r.right - 8, r.centery + 10, 7, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+
+                // Wings
+                if (this.hasWings && !flicker) {
+                    ctx.fillStyle = 'rgb(220,240,255)';
+                    ctx.beginPath();
+                    ctx.moveTo(r.x - 14, r.y + 8);
+                    ctx.lineTo(r.x - 34, r.y + 4);
+                    ctx.lineTo(r.x - 22, r.y + 20);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.strokeStyle = 'rgb(140,170,200)';
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                }
+            }
+        }
+
+        // Obstacle class
+        class Obstacle {
+            constructor(kind, x, y, w, h) {
+                this.kind = kind;
+                this.rect = { x, y, w, h, right: x + w, bottom: y + h, centerx: x + w/2, centery: y + h/2 };
+                this.phase = Math.random() * Math.PI * 2;
+            }
+
+            update(speed, tMs) {
+                this.rect.x -= Math.round(speed);
+                this.rect.right = this.rect.x + this.rect.w;
+                this.rect.centerx = this.rect.x + this.rect.w/2;
+
+                if (this.kind === "fox") {
+                    this.rect.y = (GROUND_Y - this.rect.h) + Math.floor(3 * Math.sin(tMs * 0.02 + this.phase));
+                    this.rect.bottom = this.rect.y + this.rect.h;
+                    this.rect.centery = this.rect.y + this.rect.h/2;
+                }
+            }
+
+            draw(ctx, scene) {
+                const r = this.rect;
+                
+                if (this.kind === "rock") {
+                    const peakDx = randomChoice([-4, -2, 0, 2, 4]);
+                    const baseCol = scene !== SCENE_HELL ? 'rgb(120,120,120)' : 'rgb(150,90,90)';
+                    const edgeCol = scene !== SCENE_HELL ? 'rgb(80,80,80)' : 'rgb(120,60,60)';
+                    
+                    ctx.fillStyle = baseCol;
+                    ctx.beginPath();
+                    ctx.moveTo(r.x, r.bottom - 4);
+                    ctx.lineTo(r.x + 10, r.y + 10);
+                    ctx.lineTo(r.centerx + peakDx, r.y);
+                    ctx.lineTo(r.right - 12, r.y + 14);
+                    ctx.lineTo(r.right, r.bottom - 4);
+                    ctx.closePath();
+                    ctx.fill();
+                    
+                    ctx.strokeStyle = edgeCol;
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+
+                    // Shadow
+                    ctx.fillStyle = scene !== SCENE_HELL ? 'rgb(60,80,60)' : 'rgb(120,50,50)';
+                    ctx.beginPath();
+                    ctx.ellipse(r.centerx, r.bottom - 2, 22, 4, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                } else {
+                    // Fox
+                    const bodyCol = scene !== SCENE_HELL ? 'rgb(230,120,60)' : 'rgb(210,80,50)';
+                    const lineCol = scene !== SCENE_HELL ? 'rgb(200,90,45)' : 'rgb(180,60,40)';
+
+                    // Body
+                    ctx.fillStyle = bodyCol;
+                    ctx.beginPath();
+                    ctx.ellipse(r.centerx, r.centery + 4, r.w/2, (r.h-8)/2, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = lineCol;
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+
+                    // Head
+                    const headX = r.x - 14 + 14;
+                    const headY = r.y - 6 + 12;
+                    ctx.fillStyle = bodyCol;
+                    ctx.beginPath();
+                    ctx.ellipse(headX, headY, 14, 12, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = lineCol;
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+
+                    // Ears
+                    ctx.fillStyle = bodyCol;
+                    ctx.beginPath();
+                    ctx.ellipse(headX - 12 + 7, headY - 10 + 7, 5, 7, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.beginPath();
+                    ctx.ellipse(headX - 12 + 17, headY - 8 + 6, 5, 6, 0, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // Eye
+                    ctx.fillStyle = 'rgb(30,15,10)';
+                    ctx.beginPath();
+                    ctx.arc(headX + 4, headY, 2, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // Tail
+                    ctx.fillStyle = 'rgb(255,210,140)';
+                    ctx.beginPath();
+                    ctx.moveTo(r.right - 8, r.centery + 6);
+                    ctx.lineTo(r.right + 14, r.centery + 2);
+                    ctx.lineTo(r.right - 2, r.centery + 14);
+                    ctx.closePath();
+                    ctx.fill();
+
+                    // Shadow
+                    ctx.fillStyle = scene !== SCENE_HELL ? 'rgb(60,80,60)' : 'rgb(120,50,50)';
+                    ctx.beginPath();
+                    ctx.ellipse(r.centerx, r.bottom - 2, 22, 4, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+        }
+
+        // Carrot class
+        class Carrot {
+            constructor(x, y) {
+                this.rect = { x, y, w: 22, h: 32, right: x + 22, bottom: y + 32, centerx: x + 11, centery: y + 16 };
+                this.t = 0.0;
+            }
+
+            update(speed, dt) {
+                this.rect.x -= Math.round(speed);
+                this.rect.right = this.rect.x + this.rect.w;
+                this.rect.centerx = this.rect.x + this.rect.w/2;
+                this.t += dt;
+            }
+
+            draw(ctx, scene) {
+                const r = this.rect;
+                
+                // Body
+                const bodyCol = scene !== SCENE_HELL ? 'rgb(255,150,50)' : 'rgb(255,120,80)';
+                ctx.fillStyle = bodyCol;
+                ctx.beginPath();
+                ctx.moveTo(r.centerx, r.y);
+                ctx.lineTo(r.x, r.bottom);
+                ctx.lineTo(r.right, r.bottom);
+                ctx.closePath();
+                ctx.fill();
+                
+                ctx.strokeStyle = 'rgb(180,90,30)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Leaves
+                const leafCol = scene !== SCENE_HELL ? 'rgb(70,170,80)' : 'rgb(180,90,90)';
+                ctx.fillStyle = leafCol;
+                ctx.beginPath();
+                ctx.ellipse(r.centerx - 7, r.y - 5, 5, 7, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.ellipse(r.centerx + 1, r.y - 6, 6, 8, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // WingsPickup class
+        class WingsPickup {
+            constructor(x, y) {
+                this.rect = { x, y, w: WING_PICKUP_SIZE[0], h: WING_PICKUP_SIZE[1] };
+                this.rect.right = x + this.rect.w;
+                this.rect.bottom = y + this.rect.h;
+                this.rect.centerx = x + this.rect.w/2;
+                this.rect.centery = y + this.rect.h/2;
+                this.phase = Math.random() * Math.PI * 2;
+            }
+
+            update(speed, tMs) {
+                this.rect.x -= Math.round(speed);
+                this.rect.right = this.rect.x + this.rect.w;
+                this.rect.centerx = this.rect.x + this.rect.w/2;
+                this.rect.y += Math.floor(1.4 * Math.sin(tMs * 0.01 + this.phase));
+                this.rect.bottom = this.rect.y + this.rect.h;
+                this.rect.centery = this.rect.y + this.rect.h/2;
+            }
+
+            draw(ctx, scene) {
+                const r = this.rect;
+                const fill = scene !== SCENE_HELL ? 'rgb(220,240,255)' : 'rgb(240,210,210)';
+                const edge = scene !== SCENE_HELL ? 'rgb(140,170,200)' : 'rgb(170,120,120)';
+
+                // Left wing
+                ctx.fillStyle = fill;
+                ctx.beginPath();
+                ctx.moveTo(r.centerx - 10, r.centery);
+                ctx.lineTo(r.x, r.y + 6);
+                ctx.lineTo(r.x + 12, r.bottom - 6);
+                ctx.closePath();
+                ctx.fill();
+                
+                ctx.strokeStyle = edge;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Right wing
+                ctx.fillStyle = fill;
+                ctx.beginPath();
+                ctx.moveTo(r.centerx + 10, r.centery);
+                ctx.lineTo(r.right, r.y + 6);
+                ctx.lineTo(r.right - 12, r.bottom - 6);
+                ctx.closePath();
+                ctx.fill();
+                
+                ctx.strokeStyle = edge;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+
+        // Portal class
+        class Portal {
+            constructor(kind, x, y) {
+                this.kind = kind;
+                this.rect = { x, y, w: 70, h: 140, right: x + 70, bottom: y + 140, centerx: x + 35, centery: y + 70 };
+                this.phase = Math.random() * Math.PI * 2;
+            }
+
+            update(speed, tMs) {
+                this.rect.x -= Math.round(speed);
+                this.rect.right = this.rect.x + this.rect.w;
+                this.rect.centerx = this.rect.x + this.rect.w/2;
+            }
+
+            draw(ctx) {
+                const r = this.rect;
+                let core, border;
+                
+                if (this.kind === "hell") {
+                    core = 'rgb(160,0,160)';
+                    border = 'rgb(0,0,0)';
+                } else {
+                    core = 'rgb(80,140,255)';
+                    border = 'rgb(255,255,255)';
+                }
+
+                ctx.fillStyle = core;
+                ctx.beginPath();
+                ctx.ellipse(r.centerx, r.centery, (r.w-12)/2, (r.h-12)/2, 0, 0, Math.PI * 2);
+                ctx.fill();
+                
+                ctx.strokeStyle = border;
+                ctx.lineWidth = 6;
+                ctx.beginPath();
+                ctx.ellipse(r.centerx, r.centery, r.w/2, r.h/2, 0, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+        }
+
+        // Game class
+        class Game {
+            constructor() {
+                this.best = loadBest();
+                this.reset();
+            }
+
+            reset() {
+                this.scene = SCENE_GRASS;
+                this.player = new Rabbit(180, GROUND_Y);
+                this.obstacles = [];
+                this.carrots = [];
+                this.wings = [];
+                this.portals = [];
+                this.specialCharges = 0;
+                this.playing = true;
+                this.gameover = false;
+                this.reviveUsed = false;
+                this.reviving = false;
+                this.reviveTimer = 0;
+                this.score = 0.0;
+                this.timeMs = 0;
+                
+                this.spawnCd = 1200;
+                this.carrotCd = 1200;
+                
+                this.nextWingThreshold = 500;
+                this.pendingWingAt = null;
+                
+                this.energy = 0;
+                this.coins = 0;
+                
+                this.spawnedHellPortal = false;
+                this.spawnedHeavenPortal = false;
+            }
+
+            currentSpeed() {
+                if (this.score < RAMP_START_SCORE) {
+                    return BASE_SPEED;
+                }
+                const extra = this.score - RAMP_START_SCORE;
+                return BASE_SPEED + extra * RAMP_SLOPE;
+            }
+
+            rightmostObstacleX() {
+                return Math.max(0, ...this.obstacles.map(o => o.rect.right));
+            }
+
+            shiftXToAvoidOverlap(rect, margin = 120) {
+                for (let i = 0; i < 8; i++) {
+                    let overlap = false;
+                    for (let o of this.obstacles) {
+                        if (this.rectCollides(rect, o.rect)) {
+                            rect.x = o.rect.right + margin;
+                            rect.right = rect.x + rect.w;
+                            rect.centerx = rect.x + rect.w/2;
+                            overlap = true;
+                        }
+                    }
+                    if (!overlap) break;
+                }
+                return rect.x;
+            }
+
+            rectCollides(a, b) {
+                return a.x < b.right && a.right > b.x && a.y < b.bottom && a.bottom > b.y;
+            }
+
+            destroyFrontObstacle() {
+                const ahead = this.obstacles.filter(o => o.rect.centerx > this.player.rect.centerx + 30);
+                if (ahead.length === 0) return false;
+                
+                const target = ahead.reduce((closest, current) => 
+                    current.rect.centerx < closest.rect.centerx ? current : closest
+                );
+                
+                const index = this.obstacles.indexOf(target);
+                if (index > -1) {
+                    this.obstacles.splice(index, 1);
+                    return true;
+                }
+                return false;
+            }
+
+            spawnObstacle() {
+                const kind = Math.random() < 0.64 ? "rock" : "fox";
+                let w, h;
+                
+                if (kind === "rock") {
+                    w = randomInt(ROCK_W_MIN, ROCK_W_MAX);
+                    h = randomInt(ROCK_H_MIN, ROCK_H_MAX);
+                } else {
+                    w = FOX_W;
+                    h = FOX_H;
+                }
+                
+                const x = WIDTH + 40;
+                const y = GROUND_Y - h;
+                this.obstacles.push(new Obstacle(kind, x, y, w, h));
+            }
+
+            spawnCarrots() {
+                const n = randomInt(CARROT_ROW_MIN, CARROT_ROW_MAX);
+                const y = randomChoice(CARROT_LOW_CHOICES);
+                let startX = WIDTH + 80;
+                const rmo = this.rightmostObstacleX();
+                if (rmo > 0) {
+                    startX = Math.max(startX, rmo + 140);
+                }
+                
+                for (let i = 0; i < n; i++) {
+                    const c = new Carrot(startX + i * 34, y + randomInt(-8, 8));
+                    if (this.obstacles.some(o => this.rectCollides(c.rect, o.rect))) {
+                        c.rect.x = this.shiftXToAvoidOverlap(c.rect, 140);
+                        c.rect.right = c.rect.x + c.rect.w;
+                        c.rect.centerx = c.rect.x + c.rect.w/2;
+                    }
+                    this.carrots.push(c);
+                }
+            }
+
+            scheduleWingAfterThreshold() {
+                this.pendingWingAt = this.timeMs + randomInt(WING_JITTER_MS[0], WING_JITTER_MS[1]);
+            }
+
+            actuallySpawnWing() {
+                const y = randomChoice([GROUND_Y - 180, GROUND_Y - 140, GROUND_Y - 110]);
+                let x = WIDTH + 80;
+                const rmo = this.rightmostObstacleX();
+                if (rmo > 0) {
+                    x = Math.max(x, rmo + 160);
+                }
+                
+                const w = new WingsPickup(x, y);
+                if (this.obstacles.some(o => this.rectCollides(w.rect, o.rect))) {
+                    w.rect.x = this.shiftXToAvoidOverlap(w.rect, 160);
+                    w.rect.right = w.rect.x + w.rect.w;
+                    w.rect.centerx = w.rect.x + w.rect.w/2;
+                }
+                this.wings.push(w);
+            }
+
+            spawnPortal(kind) {
+                const x = WIDTH + 120;
+                const y = GROUND_Y - 180;
+                const p = new Portal(kind, x, y);
+                
+                if (this.obstacles.some(o => this.rectCollides(p.rect, o.rect))) {
+                    p.rect.x = this.shiftXToAvoidOverlap(p.rect, 200);
+                    p.rect.right = p.rect.x + p.rect.w;
+                    p.rect.centerx = p.rect.x + p.rect.w/2;
+                }
+                this.portals.push(p);
+            }
+
+            update(dt, keysHeld) {
+                if (!this.playing || this.gameover) return;
+
+                if (this.reviving) {
+                    this.reviveTimer -= dt;
+                    if (this.reviveTimer <= 0) {
+                        this.reviving = false;
+                        this.player.iframeMs = POST_REVIVE_IFRAME_MS;
+                    }
+                    return;
+                }
+
+                this.timeMs += dt;
+                const scoreGain = dt * 0.035;
+                this.score += scoreGain;
+
+                const speed = this.currentSpeed();
+                bg.update(speed, dt);
+
+                const spaceHeld = keysHeld.space || false;
+                this.player.updatePhysics(dt, scoreGain, spaceHeld);
+
+                // Portal triggers
+                if (this.score >= 3000 && !this.spawnedHellPortal && this.scene === SCENE_GRASS) {
+                    this.spawnPortal("hell");
+                    this.spawnedHellPortal = true;
+                }
+                if (this.score >= 6000 && !this.spawnedHeavenPortal && this.scene !== SCENE_HEAVEN) {
+                    this.spawnPortal("heaven");
+                    this.spawnedHeavenPortal = true;
+                }
+
+                // Wing scheduling (not in hell)
+                if (this.scene === SCENE_GRASS || this.scene === SCENE_HEAVEN) {
+                    if (this.score >= this.nextWingThreshold) {
+                        if (this.pendingWingAt === null) {
+                            this.scheduleWingAfterThreshold();
+                        }
+                        while (this.nextWingThreshold <= this.score) {
+                            this.nextWingThreshold += 500;
+                        }
+                    }
+                    if (this.pendingWingAt !== null && this.timeMs >= this.pendingWingAt) {
+                        this.actuallySpawnWing();
+                        this.pendingWingAt = null;
+                    }
+                }
+
+                // Spawn obstacles
+                this.spawnCd -= dt;
+                if (this.spawnCd <= 0) {
+                    this.spawnObstacle();
+                    const gap = randomInt(OBST_MIN_GAP, OBST_MAX_GAP) - Math.floor(this.score * OBST_GAP_SCORE_FACTOR);
+                    this.spawnCd = Math.max(1000, gap);
+                }
+
+                // Spawn carrots
+                this.carrotCd -= dt;
+                if (this.carrotCd <= 0) {
+                    this.spawnCarrots();
+                    this.carrotCd = randomInt(1100, 1900);
+                }
+
+                // Update entities
+                for (let o of this.obstacles) {
+                    o.update(speed, this.timeMs);
+                }
+                this.obstacles = this.obstacles.filter(o => o.rect.right > -80);
+
+                for (let c of this.carrots) {
+                    c.update(speed, dt);
+                }
+                this.carrots = this.carrots.filter(c => c.rect.right > -40);
+
+                for (let w of this.wings) {
+                    w.update(speed, this.timeMs);
+                }
+                this.wings = this.wings.filter(w => w.rect.right > -40);
+
+                for (let p of this.portals) {
+                    p.update(speed, this.timeMs);
+                }
+                this.portals = this.portals.filter(p => p.rect.right > -40);
+
+                // Collisions
+                const prect = this.player.rect;
+
+                // Portals
+                for (let i = this.portals.length - 1; i >= 0; i--) {
+                    const p = this.portals[i];
+                    if (this.rectCollides(prect, p.rect)) {
+                        this.portals.splice(i, 1);
+                        if (p.kind === "hell") {
+                            this.scene = SCENE_HELL;
+                            this.specialCharges = 5;
+                        } else {
+                            this.scene = SCENE_HEAVEN;
+                            this.specialCharges = 5;
+                        }
+                        break;
+                    }
+                }
+
+                // Obstacles
+                const hitObstacle = this.obstacles.some(o => this.rectCollides(prect, o.rect));
+                if (hitObstacle && !this.player.superActive && this.player.iframeMs <= 0) {
+                    if (!this.reviveUsed) {
+                        this.reviveUsed = true;
+                        this.reviving = true;
+                        this.reviveTimer = REVIVE_COUNTDOWN_MS;
+                    } else {
+                        this.gameover = true;
+                        this.best = Math.max(this.best, Math.floor(this.score));
+                        saveBest(this.best);
+                    }
+                }
+
+                // Carrots
+                for (let i = this.carrots.length - 1; i >= 0; i--) {
+                    const c = this.carrots[i];
+                    if (this.rectCollides(prect, c.rect)) {
+                        this.carrots.splice(i, 1);
+                        this.coins++;
+                        this.score += 10;
+                        if (!this.player.superActive) {
+                            this.energy = Math.min(50, this.energy + 1);
+                            if (this.energy >= 50) {
+                                this.energy = 0;
+                                this.player.startSuper();
+                            }
+                        }
+                    }
+                }
+
+                // Wings
+                for (let i = this.wings.length - 1; i >= 0; i--) {
+                    const w = this.wings[i];
+                    if (this.rectCollides(prect, w.rect)) {
+                        this.wings.splice(i, 1);
+                        this.player.giveWings();
+                    }
+                }
+            }
+
+            drawEnergyBar(ctx) {
+                const barW = 220;
+                const barH = 20;
+                const x = WIDTH - barW - 18;
+                const y = 14;
+                
+                // Background
+                ctx.fillStyle = 'rgb(235,235,235)';
+                ctx.roundRect(x, y, barW, barH, 8);
+                ctx.fill();
+                
+                // Border
+                ctx.strokeStyle = 'rgb(120,120,120)';
+                ctx.lineWidth = 2;
+                ctx.roundRect(x, y, barW, barH, 8);
+                ctx.stroke();
+                
+                // Fill
+                const fill = Math.floor(barW * (this.energy / 50.0));
+                if (fill > 0) {
+                    ctx.fillStyle = 'rgb(255,170,70)';
+                    ctx.roundRect(x, y, fill, barH, 8);
+                    ctx.fill();
+                }
+                
+                // Label
+                ctx.fillStyle = 'rgb(10,25,10)';
+                ctx.font = '16px monospace';
+                ctx.fillText("Energy (50 carrots → SUPER)", x, y + barH + 20);
+            }
+
+            drawTimersBottomLeft(ctx) {
+                const lines = [];
+                if (this.player.hasWings) {
+                    const sec = wingsSecondsLeft(this.player.wingScoreLeft);
+                    lines.push(`Wings: ${sec}s`);
+                }
+                if (this.player.superActive) {
+                    const sec2 = Math.max(0, Math.round(this.player.superTimer / 1000));
+                    lines.push(`SUPER: ${sec2}s`);
+                }
+                if (this.scene === SCENE_HELL && this.specialCharges > 0) {
+                    lines.push(`Fireballs: ${this.specialCharges}`);
+                }
+                if (this.scene === SCENE_HEAVEN && this.specialCharges > 0) {
+                    lines.push(`Wand: ${this.specialCharges}`);
+                }
+                
+                if (lines.length > 0) {
+                    const x = 16;
+                    const y = HEIGHT - 20 - lines.length * 26;
+                    ctx.fillStyle = 'rgb(0,0,0)';
+                    ctx.font = '16px monospace';
+                    
+                    for (let i = 0; i < lines.length; i++) {
+                        ctx.fillText(lines[i], x, y + i * 26);
+                    }
+                }
+            }
+
+            draw(ctx) {
+                bg.draw(ctx, this.scene);
+                
+                for (let c of this.carrots) c.draw(ctx, this.scene);
+                for (let o of this.obstacles) o.draw(ctx, this.scene);
+                for (let w of this.wings) w.draw(ctx, this.scene);
+                for (let p of this.portals) p.draw(ctx);
+                
+                this.player.draw(ctx, this.timeMs, this.scene);
+
+                // HUD
+                const hudColor = this.scene !== SCENE_HELL ? 'rgb(10,25,10)' : 'rgb(235,220,220)';
+                ctx.fillStyle = hudColor;
+                ctx.font = '16px monospace';
+                
+                let hudText = `Score: ${Math.floor(this.score)}   Carrots: ${this.coins}   Best: ${this.best}`;
+                if (this.player.hasWings) hudText += "   Wings: ON";
+                if (this.player.superActive) hudText += "   SUPER!";
+                
+                ctx.fillText(hudText, 12, 30);
+                
+                this.drawEnergyBar(ctx);
+                this.drawTimersBottomLeft(ctx);
+
+                // Revive overlay
+                if (this.reviving) {
+                    ctx.fillStyle = this.scene !== SCENE_HELL ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.8)';
+                    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+                    
+                    const sec = Math.max(1, Math.ceil(this.reviveTimer / 1000));
+                    ctx.fillStyle = 'rgb(220,0,0)';
+                    ctx.font = '84px monospace';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(sec.toString(), WIDTH/2, HEIGHT/2);
+                    ctx.textAlign = 'left';
+                }
+
+                // Game over overlay
+                if (this.gameover) {
+                    ctx.fillStyle = 'rgba(255,255,255,0.82)';
+                    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+                    
+                    ctx.fillStyle = 'rgb(220,0,0)';
+                    ctx.font = '84px monospace';
+                    ctx.textAlign = 'center';
+                    ctx.fillText("GAME OVER", WIDTH/2, HEIGHT/2 - 40);
+                    
+                    ctx.fillStyle = 'rgb(0,0,0)';
+                    ctx.font = '16px monospace';
+                    ctx.fillText("Press SPACE to restart  |  ESC to quit", WIDTH/2, HEIGHT/2 + 20);
+                    ctx.textAlign = 'left';
+                }
+            }
+        }
+
+        // Initialize game
+        const bg = new Background();
+        const game = new Game();
+        const keysHeld = { space: false };
+
+        // Input handling
+        document.addEventListener('keydown', (event) => {
+            if (event.code === 'Escape') {
+                // Handle quit
+                return;
+            }
+            
+            if (!game.gameover && !game.reviving) {
+                if (['Space', 'ArrowUp', 'KeyW'].includes(event.code)) {
+                    event.preventDefault();
+                    game.player.startJump();
+                    keysHeld.space = true;
+                    game.player.setJumpHold(true);
+                }
+            } else if (game.gameover) {
+                if (['Space', 'KeyR'].includes(event.code)) {
+                    event.preventDefault();
+                    game.reset();
+                    keysHeld.space = false;
+                }
+            }
+        });
+
+        document.addEventListener('keyup', (event) => {
+            if (['Space', 'ArrowUp', 'KeyW'].includes(event.code)) {
+                event.preventDefault();
+                keysHeld.space = false;
+                game.player.releaseJump();
+                game.player.setJumpHold(false);
+            }
+        });
+
+        canvas.addEventListener('click', (event) => {
+            if (!game.gameover && !game.reviving && game.specialCharges > 0) {
+                if (game.destroyFrontObstacle()) {
+                    game.specialCharges--;
+                }
+            }
+        });
+
+        // Game loop
+        let lastTime = 0;
+        function gameLoop(currentTime) {
+            const dt = currentTime - lastTime;
+            lastTime = currentTime;
+
+            // Clear canvas
+            ctx.clearRect(0, 0, WIDTH, HEIGHT);
+
+            // Update and draw
+            game.update(dt, keysHeld);
+            game.draw(ctx);
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Start the game
+        requestAnimationFrame(gameLoop);
+    </script>
+</body>
+</html>
